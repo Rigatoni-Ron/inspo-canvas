@@ -1,0 +1,9 @@
+# Ingest staging — raw source files go here, not in version control
+inbox/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc

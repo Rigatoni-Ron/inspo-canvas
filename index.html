@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover" />
+  <title>AI · Inspiration</title>
+  <style>
+    :root {
+      --bg: #ece8e1;
+      --ink: #1a1a1a;
+      --muted: #6b6b6b;
+      --tile-bg: #ffffff;
+      --tile-shadow: 0 1px 2px rgba(0,0,0,.05), 0 2px 6px rgba(0,0,0,.04);
+      --tile-shadow-hover: 0 1px 2px rgba(0,0,0,.06), 0 6px 14px rgba(0,0,0,.08);
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden;
+      background: var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Helvetica Neue", sans-serif;
+      color: var(--ink);
+      overscroll-behavior: none;
+      touch-action: none;
+    }
+
+    /* Pan/zoom stage */
+    #viewport { position: absolute; inset: 0; cursor: grab; }
+    #viewport.grabbing { cursor: grabbing; }
+    #canvas { position: relative; transform-origin: 0 0; }
+
+    /* Tile */
+    .tile {
+      position: absolute;
+      background: var(--tile-bg);
+      border-radius: 14px;
+      box-shadow: var(--tile-shadow);
+      overflow: hidden;
+      text-decoration: none;
+      color: inherit;
+      transition: box-shadow .2s ease;
+      will-change: transform;
+      -webkit-user-drag: none;
+      user-select: none;
+    }
+    .tile img, .tile video { -webkit-user-drag: none; pointer-events: none; }
+    .tile:hover { box-shadow: var(--tile-shadow-hover); }
+
+    .tile .media {
+      position: relative;
+      width: 100%;
+      background: #f0ece4;
+      overflow: hidden;
+    }
+    .tile .media img.poster,
+    .tile .media video {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .tile .media video {
+      opacity: 0;
+      transition: opacity .35s ease;
+    }
+    .tile.playing .media video { opacity: 1; }
+
+    .tile .meta {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 6px 8px 6px 12px;
+      font-size: 11px; color: var(--muted);
+      border-top: 1px solid rgba(0,0,0,.05);
+    }
+    .tile .meta .src { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tile .meta .ext {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 26px; height: 22px; border-radius: 6px;
+      color: var(--muted); text-decoration: none;
+      opacity: .55;
+      transition: background .15s ease, color .15s ease, opacity .15s ease;
+    }
+    .tile:hover .meta .ext { opacity: 1; }
+    .tile .meta .ext:hover { background: rgba(0,0,0,.06); color: var(--ink); }
+
+    /* Loading skeleton */
+    .tile .media::before {
+      content: ""; position: absolute; inset: 0;
+      background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.3) 50%, transparent 70%);
+      transform: translateX(-100%);
+      animation: shimmer 1.6s ease-in-out infinite;
+      pointer-events: none;
+    }
+    .tile.loaded .media::before { display: none; }
+    @keyframes shimmer { to { transform: translateX(100%); } }
+  </style>
+</head>
+<body>
+  <div id="viewport">
+    <div id="canvas"></div>
+  </div>
+
+  <script src="https://unpkg.com/panzoom@9.4.3/dist/panzoom.min.js"></script>
+  <script>
+  (async function () {
+    const manifest = await fetch('items.json').then(r => r.json());
+
+    const canvas = document.getElementById('canvas');
+    canvas.style.width = (manifest.canvas?.width || 3000) + 'px';
+    canvas.style.height = (manifest.canvas?.height || 2000) + 'px';
+
+    // --- Tile factory ---
+    function createTile(item, offsetX, offsetY) {
+      const tile = document.createElement('div');
+      tile.className = `tile tile-${item.type}`;
+      tile.style.left = (item.x + offsetX) + 'px';
+      tile.style.top  = (item.y + offsetY) + 'px';
+      tile.style.width = item.w + 'px';
+
+      const media = document.createElement('div');
+      media.className = 'media';
+      media.style.aspectRatio = `${item.w} / ${item.h}`;
+
+      if (item.type === 'video') {
+        const poster = document.createElement('img');
+        poster.className = 'poster';
+        poster.src = `media/${item.slug}.jpg`;
+        poster.alt = '';
+        poster.loading = 'lazy';
+        poster.onload = () => tile.classList.add('loaded');
+        media.appendChild(poster);
+        tile.dataset.video = `media/${item.slug}.mp4`;
+      } else if (item.type === 'image') {
+        const img = document.createElement('img');
+        img.className = 'poster';
+        img.src = `media/${item.slug}.jpg`;
+        img.alt = '';
+        img.loading = 'lazy';
+        img.onload = () => tile.classList.add('loaded');
+        media.appendChild(img);
+      }
+      tile.appendChild(media);
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.innerHTML = `
+        <span class="src">${item.author || item.slug}</span>
+        ${item.source ? `<a class="ext" href="${item.source}" target="_blank" rel="noopener" title="Open on X">↗</a>` : ''}
+      `;
+      tile.appendChild(meta);
+      return tile;
+    }
+
+    // --- Compute world (single-copy) bounds for tiling ---
+    const oneItems = manifest.items;
+    const oneBounds = {
+      minX: Math.min(...oneItems.map(i => i.x)),
+      minY: Math.min(...oneItems.map(i => i.y)),
+      maxX: Math.max(...oneItems.map(i => i.x + i.w)),
+      maxY: Math.max(...oneItems.map(i => i.y + i.h)),
+    };
+    const GUTTER = 32;
+    const worldW = (oneBounds.maxX - oneBounds.minX) + GUTTER;
+    const worldH = (oneBounds.maxY - oneBounds.minY) + GUTTER;
+
+    // --- Truly infinite tiling via cell recycling ---
+    // Render a fixed pool of copies (5×5 grid = 25 per item). On every pan,
+    // each copy re-snaps to the closest cell around the current viewport
+    // center. Effect: as you pan, off-screen copies teleport to the opposite
+    // side, so there's always content in every direction. The 5×5 size means
+    // recycling happens 2 cells from center — well off-screen even at minZoom.
+    const COPY_RADIUS = 2; // 2 → 5×5 grid
+    const COPY_OFFSETS = [];
+    for (let dy = -COPY_RADIUS; dy <= COPY_RADIUS; dy++) {
+      for (let dx = -COPY_RADIUS; dx <= COPY_RADIUS; dx++) {
+        COPY_OFFSETS.push([dx, dy]);
+      }
+    }
+
+    const instances = []; // { tile, item, copyIdx }
+    const tiles = [];
+    for (const item of oneItems) {
+      for (let i = 0; i < COPY_OFFSETS.length; i++) {
+        const tile = createTile(item, 0, 0);
+        canvas.appendChild(tile);
+        tiles.push(tile);
+        instances.push({ tile, item, copyIdx: i });
+      }
+    }
+
+    // Reposition all instances around the viewport center. Cheap because we
+    // skip the work entirely when the viewport hasn't crossed a cell boundary.
+    const itemCenterX = (oneBounds.minX + oneBounds.maxX) / 2;
+    const itemCenterY = (oneBounds.minY + oneBounds.maxY) / 2;
+    let lastCellX = NaN, lastCellY = NaN;
+
+    function repositionInstances() {
+      const t = pz.getTransform();
+      const cx = (window.innerWidth  / 2 - t.x) / t.scale;
+      const cy = (window.innerHeight / 2 - t.y) / t.scale;
+      const baseCellX = Math.round((cx - itemCenterX) / worldW);
+      const baseCellY = Math.round((cy - itemCenterY) / worldH);
+      if (baseCellX === lastCellX && baseCellY === lastCellY) return;
+      lastCellX = baseCellX;
+      lastCellY = baseCellY;
+      for (const { tile, item, copyIdx } of instances) {
+        const [dx, dy] = COPY_OFFSETS[copyIdx];
+        tile.style.left = (item.x + (baseCellX + dx) * worldW) + 'px';
+        tile.style.top  = (item.y + (baseCellY + dy) * worldH) + 'px';
+      }
+    }
+
+    // --- Lazy video playback ---
+    // Strategy: track which video tiles are visible, then on each pan/zoom
+    // pick the N closest to viewport center to play. Beats LRU because the
+    // playing set follows the user's gaze instead of pan history.
+    const MAX_PLAYING = 12;
+    const visibleTiles = new Set();
+
+    function startVideo(tile) {
+      let v = tile.querySelector('video');
+      if (!v) {
+        v = document.createElement('video');
+        v.src = tile.dataset.video;
+        v.muted = true;
+        v.loop = true;
+        v.playsInline = true;
+        v.autoplay = true;
+        v.preload = 'auto';
+        tile.querySelector('.media').appendChild(v);
+      }
+      v.play().catch(() => {});
+      tile.classList.add('playing');
+    }
+    function stopVideo(tile) {
+      const v = tile.querySelector('video');
+      if (v) v.pause();
+      tile.classList.remove('playing');
+    }
+
+    function distanceToCenterSq(tile) {
+      const r = tile.getBoundingClientRect();
+      const dx = (r.left + r.width / 2) - window.innerWidth  / 2;
+      const dy = (r.top  + r.height / 2) - window.innerHeight / 2;
+      return dx * dx + dy * dy; // skip sqrt — only used for ordering
+    }
+
+    function rebalancePlaying() {
+      // Pick the MAX_PLAYING tiles closest to the viewport center.
+      const ranked = [...visibleTiles]
+        .map(t => ({ t, d: distanceToCenterSq(t) }))
+        .sort((a, b) => a.d - b.d);
+      const shouldPlay = new Set(ranked.slice(0, MAX_PLAYING).map(x => x.t));
+      for (const { t } of ranked) {
+        const isPlaying = t.classList.contains('playing');
+        if (shouldPlay.has(t) && !isPlaying)      startVideo(t);
+        else if (!shouldPlay.has(t) && isPlaying) stopVideo(t);
+      }
+    }
+
+    let rebalanceQueued = false;
+    function queueRebalance() {
+      if (rebalanceQueued) return;
+      rebalanceQueued = true;
+      requestAnimationFrame(() => { rebalanceQueued = false; rebalancePlaying(); });
+    }
+
+    const io = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const tile = entry.target;
+        if (!tile.dataset.video) continue;
+        if (entry.isIntersecting) {
+          visibleTiles.add(tile);
+        } else {
+          visibleTiles.delete(tile);
+          if (tile.classList.contains('playing')) stopVideo(tile);
+        }
+      }
+      queueRebalance();
+    }, { rootMargin: '100px' });
+
+    tiles.forEach((t) => { if (t.dataset.video) io.observe(t); });
+
+    // --- Pan/zoom ---
+    const viewport = document.getElementById('viewport');
+    // minZoom is tightened so users can't zoom out far enough to see dozens
+    // of tiny tiles competing for playback slots. At 0.7, viewport shows
+    // roughly 1.5 columns at full tile width.
+    const pz = panzoom(canvas, {
+      maxZoom: 3,
+      minZoom: 0.7,
+      bounds: false,
+      smoothScroll: false,
+      zoomDoubleClickSpeed: 1, // disable double-click zoom so links work
+      // No drag-suppression on tiles — pan from anywhere. Panzoom only
+      // suppresses the click event if the pointer moved past its threshold,
+      // so a no-movement click on a tile still navigates.
+    });
+
+    pz.on('panstart', () => viewport.classList.add('grabbing'));
+    pz.on('panend',   () => viewport.classList.remove('grabbing'));
+    pz.on('transform', () => {
+      repositionInstances();
+      queueRebalance(); // playing set follows the viewport
+    });
+    repositionInstances(); // initial placement
+
+    // Initial view: zoomed in to roughly native tile size, top-aligned.
+    // With infinite tiling, "fit all" no longer makes sense, so the Fit
+    // button simply recenters on the central copy at the same default zoom.
+    function initialView() {
+      const vw = window.innerWidth;
+      const TARGET_VISIBLE_COLS = 2.5;
+      const COL_W = 460;
+      const targetW = TARGET_VISIBLE_COLS * COL_W + (TARGET_VISIBLE_COLS - 1) * GUTTER;
+      const padding = 40;
+      const scale = Math.min(1.0, (vw - padding * 2) / targetW);
+
+      const contentW = oneBounds.maxX - oneBounds.minX;
+      const tx = (vw - contentW * scale) / 2 - oneBounds.minX * scale;
+      const ty = 40 - oneBounds.minY * scale; // small top breathing room
+
+      pz.zoomAbs(0, 0, scale);
+      pz.moveTo(tx, ty);
+    }
+
+    initialView();
+    window.addEventListener('resize', initialView);
+    document.addEventListener('keydown', (e) => { if (e.key === '0') initialView(); });
+  })();
+  </script>
+</body>
+</html>
