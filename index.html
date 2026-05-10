@@ -26,7 +26,9 @@
     /* Pan/zoom stage */
     #viewport { position: absolute; inset: 0; cursor: grab; }
     #viewport.grabbing { cursor: grabbing; }
-    #canvas { position: relative; transform-origin: 0 0; }
+    /* will-change on the parent (the only thing actually transformed) — NOT on
+     * each tile, which would create thousands of GPU layers. */
+    #canvas { position: relative; transform-origin: 0 0; will-change: transform; }
 
     /* Tile */
     .tile {
@@ -38,9 +40,11 @@
       text-decoration: none;
       color: inherit;
       transition: box-shadow .2s ease;
-      will-change: transform;
       -webkit-user-drag: none;
       user-select: none;
+      /* Tells the browser this tile's paint/layout is isolated from siblings.
+       * Big win when there are hundreds of tiles. */
+      contain: layout paint;
     }
     .tile img, .tile video { -webkit-user-drag: none; pointer-events: none; }
     .tile:hover { box-shadow: var(--tile-shadow-hover); }
@@ -91,9 +95,32 @@
     }
     .tile.loaded .media::before { display: none; }
     @keyframes shimmer { to { transform: translateX(100%); } }
+
+    /* ── Intro wipe (lifted from portfolio.html) ── */
+    #intro-overlay {
+      position: fixed; inset: 0; z-index: 99999;
+      pointer-events: all;
+      cursor: none;
+    }
+    #intro-top, #intro-bot {
+      position: absolute; left: 0; right: 0;
+      background: #DCDCE4;
+      will-change: transform;
+    }
+    #intro-top { top: 0; height: 50.2%; }
+    #intro-bot { bottom: 0; height: 50.2%; }
+    #intro-lc  { position: absolute; inset: 0; pointer-events: none; }
   </style>
 </head>
 <body>
+
+  <!-- Intro wipe overlay -->
+  <div id="intro-overlay" aria-hidden="true">
+    <div id="intro-top"></div>
+    <div id="intro-bot"></div>
+    <canvas id="intro-lc"></canvas>
+  </div>
+
   <div id="viewport">
     <div id="canvas"></div>
   </div>
@@ -114,6 +141,9 @@
       tile.style.left = (item.x + offsetX) + 'px';
       tile.style.top  = (item.y + offsetY) + 'px';
       tile.style.width = item.w + 'px';
+      // Cached dimensions — read in rebalancePlaying to avoid getBoundingClientRect.
+      tile.dataset.w = item.w;
+      tile.dataset.h = item.h + META_H;
 
       const media = document.createElement('div');
       media.className = 'media';
@@ -150,6 +180,7 @@
     }
 
     // --- Compute world (single-copy) bounds for tiling ---
+    const META_H = 36;
     const oneItems = manifest.items;
     const oneBounds = {
       minX: Math.min(...oneItems.map(i => i.x)),
@@ -167,7 +198,10 @@
     // center. Effect: as you pan, off-screen copies teleport to the opposite
     // side, so there's always content in every direction. The 5×5 size means
     // recycling happens 2 cells from center — well off-screen even at minZoom.
-    const COPY_RADIUS = 2; // 2 → 5×5 grid
+    // 1 → 3×3 grid (9 copies). With minZoom=0.7 the cell-recycle boundary is
+    // still off-screen, and the DOM shrinks from ~1900 nodes to ~684 — the
+    // single biggest win for canvas perf at this item count.
+    const COPY_RADIUS = 1;
     const COPY_OFFSETS = [];
     for (let dy = -COPY_RADIUS; dy <= COPY_RADIUS; dy++) {
       for (let dx = -COPY_RADIUS; dx <= COPY_RADIUS; dx++) {
@@ -177,12 +211,14 @@
 
     const instances = []; // { tile, item, copyIdx }
     const tiles = [];
+    const videoTiles = []; // subset — used by rebalancePlaying
     for (const item of oneItems) {
       for (let i = 0; i < COPY_OFFSETS.length; i++) {
         const tile = createTile(item, 0, 0);
         canvas.appendChild(tile);
         tiles.push(tile);
         instances.push({ tile, item, copyIdx: i });
+        if (item.type === 'video') videoTiles.push(tile);
       }
     }
 
@@ -209,75 +245,102 @@
     }
 
     // --- Lazy video playback ---
-    // Strategy: track which video tiles are visible, then on each pan/zoom
-    // pick the N closest to viewport center to play. Beats LRU because the
-    // playing set follows the user's gaze instead of pan history.
+    // Picks the MAX_PLAYING video tiles closest to the viewport center, every
+    // ~100ms during pan and immediately on panend. Math-based intersection
+    // (no getBoundingClientRect) — important because BCR forces a layout flush,
+    // and 30+ flushes per frame is the main cause of pan stutter at this scale.
     const MAX_PLAYING = 12;
-    const visibleTiles = new Set();
+    const TEARDOWN_MS = 2500; // grace period before fully ripping down a paused video
+    const teardownTimers = new WeakMap();
+
+    function createVideoEl(tile) {
+      const v = document.createElement('video');
+      v.src = tile.dataset.video;
+      v.muted = true;
+      v.loop = true;
+      v.playsInline = true;
+      v.autoplay = true;
+      v.preload = 'auto';
+      tile.querySelector('.media').appendChild(v);
+      return v;
+    }
 
     function startVideo(tile) {
-      let v = tile.querySelector('video');
-      if (!v) {
-        v = document.createElement('video');
-        v.src = tile.dataset.video;
-        v.muted = true;
-        v.loop = true;
-        v.playsInline = true;
-        v.autoplay = true;
-        v.preload = 'auto';
-        tile.querySelector('.media').appendChild(v);
-      }
+      // Cancel any pending teardown — tile is back in the playing set
+      const t = teardownTimers.get(tile);
+      if (t) { clearTimeout(t); teardownTimers.delete(tile); }
+      const v = tile.querySelector('video') || createVideoEl(tile);
       v.play().catch(() => {});
       tile.classList.add('playing');
     }
+
     function stopVideo(tile) {
+      // Pause now, schedule full teardown later. If the tile re-enters the
+      // playing set within TEARDOWN_MS, startVideo cancels the timer — we
+      // skip the cost of recreating the <video> element and re-buffering.
       const v = tile.querySelector('video');
       if (v) v.pause();
       tile.classList.remove('playing');
-    }
-
-    function distanceToCenterSq(tile) {
-      const r = tile.getBoundingClientRect();
-      const dx = (r.left + r.width / 2) - window.innerWidth  / 2;
-      const dy = (r.top  + r.height / 2) - window.innerHeight / 2;
-      return dx * dx + dy * dy; // skip sqrt — only used for ordering
+      if (teardownTimers.has(tile)) return;
+      const timer = setTimeout(() => {
+        teardownTimers.delete(tile);
+        const v2 = tile.querySelector('video');
+        if (v2 && !tile.classList.contains('playing')) {
+          v2.removeAttribute('src');
+          v2.load();
+          v2.remove();
+        }
+      }, TEARDOWN_MS);
+      teardownTimers.set(tile, timer);
     }
 
     function rebalancePlaying() {
-      // Pick the MAX_PLAYING tiles closest to the viewport center.
-      const ranked = [...visibleTiles]
-        .map(t => ({ t, d: distanceToCenterSq(t) }))
-        .sort((a, b) => a.d - b.d);
-      const shouldPlay = new Set(ranked.slice(0, MAX_PLAYING).map(x => x.t));
-      for (const { t } of ranked) {
-        const isPlaying = t.classList.contains('playing');
-        if (shouldPlay.has(t) && !isPlaying)      startVideo(t);
-        else if (!shouldPlay.has(t) && isPlaying) stopVideo(t);
-      }
-    }
+      const tx = pz.getTransform();
+      const scale = tx.scale, panX = tx.x, panY = tx.y;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const vcx = vw / 2, vcy = vh / 2;
 
-    let rebalanceQueued = false;
-    function queueRebalance() {
-      if (rebalanceQueued) return;
-      rebalanceQueued = true;
-      requestAnimationFrame(() => { rebalanceQueued = false; rebalancePlaying(); });
-    }
-
-    const io = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        const tile = entry.target;
-        if (!tile.dataset.video) continue;
-        if (entry.isIntersecting) {
-          visibleTiles.add(tile);
-        } else {
-          visibleTiles.delete(tile);
+      const candidates = [];
+      for (const tile of videoTiles) {
+        const wx = parseFloat(tile.style.left);
+        const wy = parseFloat(tile.style.top);
+        const ww = +tile.dataset.w;
+        const wh = +tile.dataset.h;
+        // Tile rect in viewport coords (no DOM read)
+        const left   = wx * scale + panX;
+        const top    = wy * scale + panY;
+        const right  = left + ww * scale;
+        const bottom = top  + wh * scale;
+        // Viewport intersection check with small margin
+        if (right < -100 || left > vw + 100 || bottom < -100 || top > vh + 100) {
           if (tile.classList.contains('playing')) stopVideo(tile);
+          continue;
         }
+        const dx = (left + right) / 2 - vcx;
+        const dy = (top  + bottom) / 2 - vcy;
+        candidates.push({ tile, d: dx * dx + dy * dy });
       }
-      queueRebalance();
-    }, { rootMargin: '100px' });
+      candidates.sort((a, b) => a.d - b.d);
+      const shouldPlay = new Set(candidates.slice(0, MAX_PLAYING).map(c => c.tile));
+      for (const { tile } of candidates) {
+        const isPlaying = tile.classList.contains('playing');
+        if (shouldPlay.has(tile) && !isPlaying)      startVideo(tile);
+        else if (!shouldPlay.has(tile) && isPlaying) stopVideo(tile);
+      }
+    }
 
-    tiles.forEach((t) => { if (t.dataset.video) io.observe(t); });
+    let rebalanceTimer = null;
+    function queueRebalance() {
+      if (rebalanceTimer !== null) return;
+      rebalanceTimer = setTimeout(() => {
+        rebalanceTimer = null;
+        rebalancePlaying();
+      }, 100);
+    }
+    function flushRebalance() {
+      if (rebalanceTimer !== null) { clearTimeout(rebalanceTimer); rebalanceTimer = null; }
+      rebalancePlaying();
+    }
 
     // --- Pan/zoom ---
     const viewport = document.getElementById('viewport');
@@ -296,16 +359,15 @@
     });
 
     pz.on('panstart', () => viewport.classList.add('grabbing'));
-    pz.on('panend',   () => viewport.classList.remove('grabbing'));
+    pz.on('panend',   () => {
+      viewport.classList.remove('grabbing');
+      flushRebalance(); // settle the playing set immediately when the user lets go
+    });
     pz.on('transform', () => {
       repositionInstances();
-      queueRebalance(); // playing set follows the viewport
+      queueRebalance(); // playing set follows the viewport (throttled to 100ms)
     });
-    repositionInstances(); // initial placement
-
     // Initial view: zoomed in to roughly native tile size, top-aligned.
-    // With infinite tiling, "fit all" no longer makes sense, so the Fit
-    // button simply recenters on the central copy at the same default zoom.
     function initialView() {
       const vw = window.innerWidth;
       const TARGET_VISIBLE_COLS = 2.5;
@@ -325,6 +387,276 @@
     initialView();
     window.addEventListener('resize', initialView);
     document.addEventListener('keydown', (e) => { if (e.key === '0') initialView(); });
+  })();
+  </script>
+
+  <!-- ── Intro wipe animation (lifted from portfolio.html) ── -->
+  <script>
+  (function () {
+    const overlay  = document.getElementById('intro-overlay');
+    const topPanel = document.getElementById('intro-top');
+    const botPanel = document.getElementById('intro-bot');
+    const lc       = document.getElementById('intro-lc');
+    if (!overlay || !lc) return;
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const LW  = window.innerWidth;
+    const LH  = window.innerHeight;
+    lc.width  = LW * dpr;
+    lc.height = LH * dpr;
+    lc.style.width  = LW + 'px';
+    lc.style.height = LH + 'px';
+
+    const ctx = lc.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    /* ── text layout ── */
+    const TEXT     = 'Welcome to the AI workshop';
+    const fontSize = Math.min(40, Math.max(20, LW / 26));
+    const FONT     = `400 ${fontSize}px "Inter", sans-serif`;
+
+    ctx.font         = FONT;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign    = 'left';
+
+    const totalW = ctx.measureText(TEXT).width;
+    const startX = (LW - totalW) / 2;
+    const textY  = LH / 2;
+
+    /* one object per character */
+    const letters = [];
+    let cx = startX;
+    for (const ch of TEXT) {
+      const w = ctx.measureText(ch).width;
+      letters.push({
+        char: ch, w,
+        ox: cx, oy: textY,
+        x: cx,  y: textY,
+        visible: false, knocked: false,
+        alpha: 1, vx: 0, vy: 0, va: 0, angle: 0, gravity: 0,
+      });
+      cx += w;
+    }
+
+    /* ── particles ── */
+    const particles = [];
+    function spawnParticles(x, y, n) {
+      for (let i = 0; i < n; i++) {
+        const dir = Math.random() < 0.5 ? -1 : 1;
+        particles.push({
+          x, y,
+          vx: (Math.random() - 0.5) * 1.1,
+          vy: dir * (1.2 + Math.random() * 2.6),
+          life: 1,
+          decay: 0.022 + Math.random() * 0.030,
+          r: 0.65 + Math.random() * 1.4,
+        });
+      }
+    }
+
+    function knock(l) {
+      l.knocked = true;
+      const dir = Math.random() < 0.58 ? -1 : 1;
+      l.vx      = (Math.random() - 0.28) * 8;
+      l.vy      = dir * (5 + Math.random() * 10);
+      l.va      = (Math.random() - 0.5) * 0.38;
+      l.gravity = 0.22 + Math.random() * 0.20;
+    }
+
+    /* ── timing ── */
+    const CHAR_MS = 50;   /* per-character typing pace */
+    const WAIT_MS = 900;  /* pause after full text */
+    const LINE_MS = 380;  /* line sweep duration */
+
+    function easeOut(t) { return 1 - Math.pow(1 - t, 2.8); }
+
+    let t0 = null, lastCharTs = null;
+    let typedCount = 0;
+    let phase = 'typing';
+    let phaseTs = null;
+    let lineX = 0, peeled = false;
+
+    /* blinking cursor */
+    let cursorVisible = true;
+    const cursorTimer = setInterval(() => { cursorVisible = !cursorVisible; }, 520);
+
+    /* ── Win95 canvas cursor ── */
+    const win95 = {
+      x: LW / 2, y: LH / 2,
+      vx: 0, vy: 0, angle: 0, va: 0,
+      alpha: 1, falling: false, knocked: false,
+    };
+    overlay.addEventListener('mousemove', e => {
+      if (!win95.falling) { win95.x = e.clientX; win95.y = e.clientY; }
+    });
+    function drawWin95Cursor(x, y, angle, alpha) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(x, y);
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.moveTo(0,   0);
+      ctx.lineTo(0,   19);
+      ctx.lineTo(4.5, 14);
+      ctx.lineTo(7.5, 21);
+      ctx.lineTo(10,  20);
+      ctx.lineTo(7,   13);
+      ctx.lineTo(11,  13);
+      ctx.closePath();
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth   = 1.8;
+      ctx.lineJoin    = 'round';
+      ctx.stroke();
+      ctx.fillStyle   = '#111';
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function frame(ts) {
+      if (!t0) { t0 = ts; lastCharTs = ts; phaseTs = ts; }
+      ctx.clearRect(0, 0, LW, LH);
+      const cy = LH / 2;
+
+      if (phase === 'typing') {
+        if (typedCount < letters.length) {
+          if (ts - lastCharTs >= CHAR_MS) {
+            letters[typedCount].visible = true;
+            typedCount++;
+            lastCharTs = ts;
+          }
+        } else if (ts - lastCharTs >= WAIT_MS) {
+          phase = 'sweeping';
+          phaseTs = ts;
+          clearInterval(cursorTimer);
+        }
+      }
+
+      if (phase === 'sweeping') {
+        const lineT = Math.min((ts - phaseTs) / LINE_MS, 1);
+        lineX = easeOut(lineT) * LW;
+
+        for (const l of letters) {
+          if (!l.knocked && l.visible && lineX >= l.ox) {
+            knock(l);
+            spawnParticles(l.ox + l.w / 2, cy, 5);
+          }
+        }
+
+        if (!win95.knocked && lineX >= win95.x) {
+          win95.knocked = true;
+          win95.falling = true;
+          win95.vy = 8 + Math.random() * 5;
+          win95.vx = (Math.random() - 0.5) * 3;
+          win95.va = (Math.random() - 0.5) * 0.10;
+          spawnParticles(win95.x + 5, win95.y + 10, 6);
+        }
+
+        if (!peeled) {
+          ctx.strokeStyle = '#0b0b18';
+          ctx.lineWidth   = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(0, cy);
+          ctx.lineTo(lineX, cy);
+          ctx.stroke();
+
+          const g = ctx.createRadialGradient(lineX, cy, 0, lineX, cy, 24);
+          g.addColorStop(0, 'rgba(8,8,24,0.28)');
+          g.addColorStop(1, 'rgba(8,8,24,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(lineX - 24, cy - 24, 48, 48);
+
+          ctx.shadowBlur  = 9;
+          ctx.shadowColor = 'rgba(200,218,255,0.92)';
+          ctx.fillStyle   = 'rgba(220,232,255,0.95)';
+          ctx.beginPath();
+          ctx.arc(lineX, cy, 2.8, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        }
+
+        if (lineT < 1) spawnParticles(lineX, cy, 2);
+
+        if (lineT >= 1 && !peeled) {
+          peeled = true;
+          setTimeout(() => {
+            const ease = 'cubic-bezier(0.76, 0, 0.24, 1)';
+            topPanel.style.transition = `transform 0.58s ${ease}`;
+            botPanel.style.transition = `transform 0.58s ${ease}`;
+            topPanel.style.transform  = 'translateY(-101%)';
+            botPanel.style.transform  = 'translateY(101%)';
+            setTimeout(() => {
+              overlay.style.display = 'none';
+              phase = 'done';
+              window.__introDone = true;
+              window.dispatchEvent(new Event('intro-done'));
+            }, 640);
+          }, 55);
+        }
+      }
+
+      ctx.font         = FONT;
+      ctx.textBaseline = 'middle';
+      ctx.textAlign    = 'left';
+
+      for (const l of letters) {
+        if (!l.visible) continue;
+        if (l.knocked) {
+          l.x     += l.vx;
+          l.y     += l.vy;
+          l.vy    += l.gravity;
+          l.angle += l.va;
+          l.alpha  = Math.max(0, l.alpha - 0.020);
+          if (l.alpha <= 0) continue;
+
+          ctx.save();
+          ctx.globalAlpha = l.alpha;
+          ctx.translate(l.x + l.w / 2, l.y);
+          ctx.rotate(l.angle);
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#0b0b18';
+          ctx.fillText(l.char, 0, 0);
+          ctx.restore();
+        } else {
+          ctx.fillStyle = '#0b0b18';
+          ctx.fillText(l.char, l.ox, l.oy);
+        }
+      }
+
+      if (phase === 'typing' && typedCount > 0 && cursorVisible) {
+        const last = letters[typedCount - 1];
+        const cw   = last.w;
+        const ch   = fontSize * 0.88;
+        ctx.fillStyle = 'rgba(11,11,24,0.88)';
+        ctx.fillRect(last.ox + last.w + 1, textY - ch / 2, cw, ch);
+      }
+
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x  += p.vx;
+        p.y  += p.vy;
+        p.vy += 0.07;
+        p.life -= p.decay;
+        if (p.life <= 0) { particles.splice(i, 1); continue; }
+        ctx.fillStyle = `rgba(10,12,28,${(p.life * 0.70).toFixed(3)})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      if (win95.falling) {
+        win95.x     += win95.vx;
+        win95.y     += win95.vy;
+        win95.vy    += 0.55;
+        win95.angle += win95.va;
+      }
+      if (win95.alpha > 0 && win95.y < LH + 40) {
+        drawWin95Cursor(win95.x, win95.y, win95.angle, win95.alpha);
+      }
+
+      if (phase !== 'done' || particles.length > 0) requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
   })();
   </script>
 </body>
