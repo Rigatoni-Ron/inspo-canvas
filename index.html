@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover" />
   <title>AI · Inspiration</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #D6D9DD;
@@ -33,27 +36,30 @@
     /* Tile */
     .tile {
       position: absolute;
-      background: var(--tile-bg);
-      border-radius: 14px;
-      box-shadow: var(--tile-shadow);
+      box-sizing: content-box; /* opt out of the global border-box so width = inner content; padding extends external size */
+      background: #212121;
+      border-radius: 16px;
+      padding: 8px 8px 16px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
       overflow: hidden;
-      text-decoration: none;
-      color: inherit;
+      color: #e8e8e8;
       transition: box-shadow .2s ease;
+      box-shadow: 0 1px 2px rgba(0,0,0,.06), 0 4px 12px rgba(0,0,0,.06);
       -webkit-user-drag: none;
       user-select: none;
-      /* Tells the browser this tile's paint/layout is isolated from siblings.
-       * Big win when there are hundreds of tiles. */
       contain: layout paint;
     }
     .tile img, .tile video { -webkit-user-drag: none; pointer-events: none; }
-    .tile:hover { box-shadow: var(--tile-shadow-hover); }
+    .tile:hover { box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 8px 20px rgba(0,0,0,.10); }
 
     .tile .media {
       position: relative;
       width: 100%;
-      background: #f0ece4;
+      background: #2a2a2a;
       overflow: hidden;
+      border-radius: 16px;
     }
     .tile .media img.poster,
     .tile .media video {
@@ -70,25 +76,29 @@
 
     .tile .meta {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 6px 8px 6px 12px;
-      font-size: 11px; color: var(--muted);
-      border-top: 1px solid rgba(0,0,0,.05);
+      width: 100%;
+      font-size: 12px; line-height: 1;
+      color: #e8e8e8;
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     }
-    .tile .meta .src { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tile .meta .src { padding-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tile .meta .ext {
+      flex-shrink: 0;
       display: inline-flex; align-items: center; justify-content: center;
-      width: 26px; height: 22px; border-radius: 6px;
-      color: var(--muted); text-decoration: none;
-      opacity: .55;
-      transition: background .15s ease, color .15s ease, opacity .15s ease;
+      width: 24px; height: 24px;
+      color: #e8e8e8; text-decoration: none;
+      border-radius: 6px;
+      opacity: .85;
+      transition: background .15s ease, opacity .15s ease;
     }
     .tile:hover .meta .ext { opacity: 1; }
-    .tile .meta .ext:hover { background: rgba(0,0,0,.06); color: var(--ink); }
+    .tile .meta .ext:hover { background: rgba(255,255,255,.08); }
+    .tile .meta .ext svg { display: block; }
 
-    /* Loading skeleton */
+    /* Loading skeleton — subtle on dark bg */
     .tile .media::before {
       content: ""; position: absolute; inset: 0;
-      background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.3) 50%, transparent 70%);
+      background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.06) 50%, transparent 70%);
       transform: translateX(-100%);
       animation: shimmer 1.6s ease-in-out infinite;
       pointer-events: none;
@@ -171,22 +181,27 @@
 
       const meta = document.createElement('div');
       meta.className = 'meta';
+      const arrowSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>`;
       meta.innerHTML = `
         <span class="src">${item.author || item.slug}</span>
-        ${item.source ? `<a class="ext" href="${item.source}" target="_blank" rel="noopener" title="Open on X">↗</a>` : ''}
+        ${item.source ? `<a class="ext" href="${item.source}" target="_blank" rel="noopener" title="Open on X">${arrowSvg}</a>` : ''}
       `;
       tile.appendChild(meta);
       return tile;
     }
 
     // --- Compute world (single-copy) bounds for tiling ---
-    const META_H = 36;
+    // CARD_PAD covers the dark-card padding (8px sides, 16px bottom + 8px top
+    // = 24px vertical). META_H is the full height the card adds beyond the
+    // image: top-pad + gap + meta-row + bottom-pad = 8 + 8 + 24 + 16 = 56.
+    const META_H = 56;
+    const CARD_PAD_X = 16; // 8px each side
     const oneItems = manifest.items;
     const oneBounds = {
       minX: Math.min(...oneItems.map(i => i.x)),
       minY: Math.min(...oneItems.map(i => i.y)),
-      maxX: Math.max(...oneItems.map(i => i.x + i.w)),
-      maxY: Math.max(...oneItems.map(i => i.y + i.h)),
+      maxX: Math.max(...oneItems.map(i => i.x + i.w + CARD_PAD_X)),
+      maxY: Math.max(...oneItems.map(i => i.y + i.h + META_H)),
     };
     const GUTTER = 32;
     const worldW = (oneBounds.maxX - oneBounds.minX) + GUTTER;

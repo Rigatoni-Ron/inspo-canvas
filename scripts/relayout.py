@@ -12,26 +12,30 @@ ROOT = Path(__file__).resolve().parent.parent
 ITEMS = ROOT / "items.json"
 
 COLS = 5
-COL_W = 460
+COL_W = 460   # Inner image width (item.w in manifest)
 GUTTER = 32
-META_H = 36  # Height of the .meta footer (padding + line + border). Keep in
-             # sync with the .tile .meta CSS in index.html.
+# The card has 8px horizontal padding each side and 8/16px vertical, plus an
+# 8px gap between media and meta, plus the 24px meta row. So the rendered
+# tile is COL_W + CARD_PAD_X wide and item.h + META_H tall externally.
+CARD_PAD_X = 16  # 8 + 8
+META_H = 56      # 8 (top pad) + 8 (gap) + 24 (meta row) + 16 (bottom pad)
 START_X = 200
 START_Y = 200
 
 
 def layout(items):
-    col_x = [START_X + c * (COL_W + GUTTER) for c in range(COLS)]
+    # Columns are spaced for the EXTERNAL tile width (COL_W + CARD_PAD_X)
+    # plus the gutter between cards.
+    col_step = COL_W + CARD_PAD_X + GUTTER
+    col_x = [START_X + c * col_step for c in range(COLS)]
     col_y = [START_Y] * COLS
     for item in items:
         new_h = max(1, int(round(item["h"] * COL_W / item["w"])))
-        c = col_y.index(min(col_y))  # shortest column wins
+        c = col_y.index(min(col_y))
         item["w"] = COL_W
         item["h"] = new_h
         item["x"] = col_x[c]
         item["y"] = col_y[c]
-        # Advance by media height + meta footer + gutter so the *visible*
-        # gap below the tile is GUTTER pixels.
         col_y[c] += new_h + META_H + GUTTER
     return col_y
 
@@ -41,8 +45,8 @@ def main():
     items = manifest["items"]
     col_y = layout(items)
 
-    max_x = max(i["x"] + i["w"] for i in items)
-    max_y = max(i["y"] + i["h"] for i in items)
+    max_x = max(i["x"] + i["w"] + CARD_PAD_X for i in items)
+    max_y = max(i["y"] + i["h"] + META_H for i in items)
     manifest["canvas"] = {"width": max_x + 200, "height": max_y + 200}
 
     ITEMS.write_text(json.dumps(manifest, indent=2) + "\n")
