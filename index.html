@@ -6,7 +6,7 @@
   <title>AI · Inspiration</title>
   <style>
     :root {
-      --bg: #ece8e1;
+      --bg: #D6D9DD;
       --ink: #1a1a1a;
       --muted: #6b6b6b;
       --tile-bg: #ffffff;
@@ -104,7 +104,7 @@
     }
     #intro-top, #intro-bot {
       position: absolute; left: 0; right: 0;
-      background: #DCDCE4;
+      background: #000;
       will-change: transform;
     }
     #intro-top { top: 0; height: 50.2%; }
@@ -411,7 +411,7 @@
     ctx.scale(dpr, dpr);
 
     /* ── text layout ── */
-    const TEXT     = 'Welcome to the AI workshop';
+    const TEXT     = 'Welcome to the Digital Assets AI workshop';
     const fontSize = Math.min(40, Math.max(20, LW / 26));
     const FONT     = `400 ${fontSize}px "Inter", sans-serif`;
 
@@ -503,11 +503,12 @@
       ctx.lineTo(7,   13);
       ctx.lineTo(11,  13);
       ctx.closePath();
-      ctx.strokeStyle = 'white';
+      /* Inverted for dark mode: dark stroke, white fill */
+      ctx.strokeStyle = '#0a0a0e';
       ctx.lineWidth   = 1.8;
       ctx.lineJoin    = 'round';
       ctx.stroke();
-      ctx.fillStyle   = '#111';
+      ctx.fillStyle   = '#f0f0f2';
       ctx.fill();
       ctx.restore();
     }
@@ -552,24 +553,30 @@
         }
 
         if (!peeled) {
-          ctx.strokeStyle = '#0b0b18';
-          ctx.lineWidth   = 1.5;
+          /* glowing white beam */
+          ctx.shadowBlur  = 10;
+          ctx.shadowColor = 'rgba(220,232,255,0.85)';
+          ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+          ctx.lineWidth   = 1.6;
           ctx.beginPath();
           ctx.moveTo(0, cy);
           ctx.lineTo(lineX, cy);
           ctx.stroke();
+          ctx.shadowBlur = 0;
 
-          const g = ctx.createRadialGradient(lineX, cy, 0, lineX, cy, 24);
-          g.addColorStop(0, 'rgba(8,8,24,0.28)');
-          g.addColorStop(1, 'rgba(8,8,24,0)');
+          /* leading halo — bright white */
+          const g = ctx.createRadialGradient(lineX, cy, 0, lineX, cy, 28);
+          g.addColorStop(0, 'rgba(255,255,255,0.45)');
+          g.addColorStop(1, 'rgba(255,255,255,0)');
           ctx.fillStyle = g;
-          ctx.fillRect(lineX - 24, cy - 24, 48, 48);
+          ctx.fillRect(lineX - 28, cy - 28, 56, 56);
 
-          ctx.shadowBlur  = 9;
-          ctx.shadowColor = 'rgba(200,218,255,0.92)';
-          ctx.fillStyle   = 'rgba(220,232,255,0.95)';
+          /* leading dot — already white, slightly stronger glow */
+          ctx.shadowBlur  = 14;
+          ctx.shadowColor = 'rgba(220,232,255,0.95)';
+          ctx.fillStyle   = 'rgba(255,255,255,1)';
           ctx.beginPath();
-          ctx.arc(lineX, cy, 2.8, 0, Math.PI * 2);
+          ctx.arc(lineX, cy, 3.2, 0, Math.PI * 2);
           ctx.fill();
           ctx.shadowBlur = 0;
         }
@@ -613,11 +620,11 @@
           ctx.translate(l.x + l.w / 2, l.y);
           ctx.rotate(l.angle);
           ctx.textAlign = 'center';
-          ctx.fillStyle = '#0b0b18';
+          ctx.fillStyle = '#e8e8ea';
           ctx.fillText(l.char, 0, 0);
           ctx.restore();
         } else {
-          ctx.fillStyle = '#0b0b18';
+          ctx.fillStyle = '#e8e8ea';
           ctx.fillText(l.char, l.ox, l.oy);
         }
       }
@@ -626,7 +633,7 @@
         const last = letters[typedCount - 1];
         const cw   = last.w;
         const ch   = fontSize * 0.88;
-        ctx.fillStyle = 'rgba(11,11,24,0.88)';
+        ctx.fillStyle = 'rgba(232,232,234,0.88)';
         ctx.fillRect(last.ox + last.w + 1, textY - ch / 2, cw, ch);
       }
 
@@ -637,7 +644,7 @@
         p.vy += 0.07;
         p.life -= p.decay;
         if (p.life <= 0) { particles.splice(i, 1); continue; }
-        ctx.fillStyle = `rgba(10,12,28,${(p.life * 0.70).toFixed(3)})`;
+        ctx.fillStyle = `rgba(232,232,234,${(p.life * 0.70).toFixed(3)})`;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
         ctx.fill();
